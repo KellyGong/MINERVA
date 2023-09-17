@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-source $1
+. $1
 export PYTHONPATH="."
-gpu_id=1
+gpu_id=0
 cmd="python code/model/trainer.py --base_output_dir $base_output_dir --path_length $path_length --hidden_size $hidden_size --embedding_size $embedding_size \
     --batch_size $batch_size --beta $beta --Lambda $Lambda --use_entity_embeddings $use_entity_embeddings \
     --train_entity_embeddings $train_entity_embeddings --train_relation_embeddings $train_relation_embeddings \
