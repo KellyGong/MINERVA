@@ -40,7 +40,7 @@ class Trainer(object):
         for key, val in params.items(): setattr(self, key, val)
 
         self.agent = Agent(params).to(self.device)
-        self.save_path = None
+        self.save_path = self.model_dir + "model" + '.ckpt'
         self.train_environment = env(params, 'train')
         self.dev_test_environment = env(params, 'dev')
         self.test_test_environment = env(params, 'test')
@@ -641,9 +641,8 @@ if __name__ == '__main__':
     #Training
     if not options['load_model']:
         trainer = Trainer(options)
-
-        trainer.train()
         save_path = trainer.save_path
+        trainer.train()
         path_logger_file = trainer.path_logger_file
         output_dir = trainer.output_dir
 
@@ -657,22 +656,22 @@ if __name__ == '__main__':
         save_path = options['model_load_dir']
         path_logger_file = trainer.path_logger_file
         output_dir = trainer.output_dir
-    with tf.Session(config=config) as sess:
-        trainer.initialize(restore=save_path, sess=sess)
+    # with tf.Session(config=config) as sess:
+    #     trainer.initialize(restore=save_path, sess=sess)
 
-        trainer.test_rollouts = 100
+    trainer.test_rollouts = 100
 
-        os.mkdir(path_logger_file + "/" + "test_beam")
-        trainer.path_logger_file_ = path_logger_file + "/" + "test_beam" + "/paths"
-        with open(output_dir + '/scores.txt', 'a') as score_file:
-            score_file.write("Test (beam) scores with best model from " + save_path + "\n")
-        trainer.test_environment = trainer.test_test_environment
-        trainer.test_environment.test_rollouts = 100
+    os.mkdir(path_logger_file + "/" + "test_beam")
+    trainer.path_logger_file_ = path_logger_file + "/" + "test_beam" + "/paths"
+    with open(output_dir + '/scores.txt', 'a') as score_file:
+        score_file.write("Test (beam) scores with best model from " + trainer.save_path + "\n")
+    trainer.test_environment = trainer.test_test_environment
+    trainer.test_environment.test_rollouts = 100
 
-        trainer.test(sess, beam=True, print_paths=True, save_model=False)
+    trainer.test(beam=True, print_paths=True, save_model=False)
 
 
-        print(options['nell_evaluation'])
-        if options['nell_evaluation'] == 1:
-            nell_eval(path_logger_file + "/" + "test_beam/" + "pathsanswers", trainer.data_input_dir+'/sort_test.pairs' )
+    print(options['nell_evaluation'])
+    if options['nell_evaluation'] == 1:
+        nell_eval(path_logger_file + "/" + "test_beam/" + "pathsanswers", trainer.data_input_dir+'/sort_test.pairs' )
 
