@@ -9,10 +9,10 @@ class Policy_step(nn.Module):
     def __init__(self, m, embedding_size, hidden_size):
         super(Policy_step, self).__init__()
         self.batch_norm = nn.BatchNorm1d(m * hidden_size)
-        self.lstm_cell = nn.LSTMCell(input_size=2 * m * embedding_size, hidden_size=2 * m * hidden_size)
-        self.l1 = nn.Linear(m * embedding_size, 2 * m * embedding_size)
-        self.l2 = nn.Linear(2 * m * embedding_size, m * embedding_size)
-        self.l3 = nn.Linear(2 * m * embedding_size, m * embedding_size)
+        self.lstm_cell = nn.LSTMCell(input_size=m * embedding_size, hidden_size=m * hidden_size)
+        self.l1 = nn.Linear(m * embedding_size, m * embedding_size)
+        self.l2 = nn.Linear(m * embedding_size, m * embedding_size)
+        self.l3 = nn.Linear(m * embedding_size, m * embedding_size)
 
     def forward(self, prev_action, prev_state):
         prev_action = torch.relu(self.l1(prev_action))
@@ -151,7 +151,7 @@ class Agent(nn.Module):
             action_embedding = relation_embedding
         return action_embedding
 
-    def step(self, next_relations, next_entities, prev_state, prev_relation, query_embedding, current_entities,
+    def step(self, next_relations, next_entities, prev_state, prev_relation, query_relation, current_entities,
              range_arr, first_step_of_test):
 
         prev_action_embedding = self.action_encoder(prev_relation, current_entities)
@@ -171,11 +171,12 @@ class Agent(nn.Module):
         # else:
         #     state = output
         candidate_action_embeddings = self.action_encoder(next_relations, next_entities)
+        query_embedding = self.relation_embedding(query_relation)
         state_query_concat = torch.cat([state, query_embedding], dim=-1)
 
         # MLP for policy#
 
-        output = self.policy_MLP(state_query_concat)
+        output = self.policy_mlp(state_query_concat)
         output_expanded = torch.unsqueeze(output, dim=1)  # [B, 1, 2D]
         # output_expanded = tf.expand_dims(output, axis=1)  # [B, 1, 2D]
         # prelim_scores = tf.reduce_sum(tf.multiply(candidate_action_embeddings, output_expanded), axis=2)

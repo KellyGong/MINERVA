@@ -26,6 +26,14 @@ logger = logging.getLogger()
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 
+def no_grad(func):
+    def wrapper(*args, **kwargs):
+        with torch.no_grad():
+            result = func(*args, **kwargs)
+        return result
+    return wrapper
+
+
 class Trainer(object):
     def __init__(self, params):
         # transfer parameters to self
@@ -182,9 +190,9 @@ class Trainer(object):
         # for t in reversed(range(self.path_length)):
         #     running_add = self.gamma * running_add + cum_disc_reward[:, t]
         #     cum_disc_reward[:, t] = running_add
-        running_add = torch.zeros([rewards.size(0)]).to(self.device)
-        cum_disc_reward = torch.zeros([rewards.size(0), self.path_length]).to(self.device)
-        cum_disc_reward[:, self.path_length - 1] = rewards
+        running_add = torch.zeros([rewards.size]).to(self.device)
+        cum_disc_reward = torch.zeros([rewards.size, self.path_length]).to(self.device)
+        cum_disc_reward[:, self.path_length - 1] = torch.from_numpy(rewards).to(self.device)
         for t in reversed(range(self.path_length)):
             running_add = self.gamma * running_add + cum_disc_reward[:, t]
             cum_disc_reward[:, t] = running_add
@@ -269,7 +277,7 @@ class Trainer(object):
                                                                      next_entities=next_possible_entities, 
                                                                      prev_state=entity_state_emb, 
                                                                      prev_relation=prev_relation, 
-                                                                     query_embedding=query_relation, 
+                                                                     query_relation=query_relation, 
                                                                      current_entities=current_entities_t,
                                                                      range_arr=range_arr, 
                                                                      first_step_of_test=first_step_of_test
@@ -281,8 +289,9 @@ class Trainer(object):
                 # loss_before_regularization.append(per_example_loss)
                 # logits.append(per_example_logits)
                 # action = np.squeeze(action, axis=1)  # [B,]
+                idx = idx.cpu().numpy()
                 state = episode(idx)
-                next_possible_relations = torch.tesnor(state['next_relations']).long().to(self.device)
+                next_possible_relations = torch.tensor(state['next_relations']).long().to(self.device)
                 next_possible_entities = torch.tensor(state['next_entities']).long().to(self.device)
                 current_entities_t = torch.tensor(state['current_entities']).long().to(self.device)
                 prev_relation = chosen_relation.to(self.device)
@@ -321,14 +330,13 @@ class Trainer(object):
             reward_reshape = np.sum(reward_reshape, axis=1)  # [orig_batch]
             reward_reshape = (reward_reshape > 0)
             num_ep_correct = np.sum(reward_reshape)
-            if np.isnan(batch_total_loss.cpu().numpy()):
+            if np.isnan(batch_total_loss.cpu().detach().numpy()):
                 raise ArithmeticError("Error in computing loss")
 
             logger.info("batch_counter: {0:4d}, num_hits: {1:7.4f}, avg. reward per batch {2:7.4f}, "
                         "num_ep_correct {3:4d}, avg_ep_correct {4:7.4f}, train loss {5:7.4f}".
                         format(self.batch_counter, np.sum(rewards), avg_reward, num_ep_correct,
-                               (num_ep_correct / self.batch_size),
-                               train_loss))
+                               (num_ep_correct / self.batch_size), batch_total_loss.cpu().detach().numpy()))
 
             if self.batch_counter%self.eval_every == 0:
                 with open(self.output_dir + '/scores.txt', 'a') as score_file:
@@ -338,19 +346,19 @@ class Trainer(object):
 
 
 
-                self.test(sess, beam=True, print_paths=False)
+                self.test(beam=True, print_paths=False)
 
             logger.info('Memory usage: %s (kb)' % resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
             gc.collect()
             if self.batch_counter >= self.total_iterations:
                 break
-
-    def test(self, sess, beam=False, print_paths=False, save_model = True, auc = False):
+    
+    @no_grad
+    def test(self, beam=False, print_paths=False, save_model = True, auc = False):
         batch_counter = 0
         paths = defaultdict(list)
         answers = []
-        feed_dict = {}
         all_final_reward_1 = 0
         all_final_reward_3 = 0
         all_final_reward_5 = 0
@@ -364,18 +372,31 @@ class Trainer(object):
 
             temp_batch_size = episode.no_examples
 
-            self.qr = episode.get_query_relation()
-            feed_dict[self.query_relation] = self.qr
+            qr = episode.get_query_relation()
+            # feed_dict[self.query_relation] = self.qr
+            query_relation = torch.tensor(qr).long().to(self.device)
             # set initial beam probs
-            beam_probs = np.zeros((temp_batch_size * self.test_rollouts, 1))
+            # beam_probs = np.zeros((temp_batch_size * self.test_rollouts, 1))
+            beam_probs = torch.zeros((temp_batch_size * self.test_rollouts, 1)).to(self.device)
             # get initial state
             state = episode.get_state()
-            mem = self.agent.get_mem_shape()
-            agent_mem = np.zeros((mem[0], mem[1], temp_batch_size*self.test_rollouts, mem[3]) ).astype('float32')
-            previous_relation = np.ones((temp_batch_size * self.test_rollouts, ), dtype='int64') * self.relation_vocab[
-                'DUMMY_START_RELATION']
-            feed_dict[self.range_arr] = np.arange(temp_batch_size * self.test_rollouts)
-            feed_dict[self.input_path[0]] = np.zeros(temp_batch_size * self.test_rollouts)
+            # mem = self.agent.get_mem_shape()
+            # agent_mem = np.zeros((mem[0], mem[1], temp_batch_size*self.test_rollouts, mem[3]) ).astype('float32')
+            # previous_relation = np.ones((temp_batch_size * self.test_rollouts, ), dtype='int64') * self.relation_vocab[
+            #     'DUMMY_START_RELATION']
+
+            next_relations = torch.tensor(state['next_relations']).long().to(self.device)
+            next_entities = torch.tensor(state['next_entities']).long().to(self.device)
+            current_entities = torch.tensor(state['current_entities']).long().to(self.device)
+
+            entity_state_emb = torch.zeros(1, 2, temp_batch_size * self.test_rollouts,
+										   self.agent.m * self.embedding_size).to(self.device)
+            range_arr = torch.arange(temp_batch_size * self.test_rollouts).to(self.device)
+
+            prev_relation = (torch.ones(temp_batch_size * self.test_rollouts) * self.relation_vocab[
+                'DUMMY_START_RELATION']).long().to(self.device)
+            # feed_dict[self.range_arr] = np.arange(temp_batch_size * self.test_rollouts)
+            # feed_dict[self.input_path[0]] = np.zeros(temp_batch_size * self.test_rollouts)
 
             ####logger code####
             if print_paths:
@@ -388,21 +409,28 @@ class Trainer(object):
             # for each time step
             for i in range(self.path_length):
                 if i == 0:
-                    feed_dict[self.first_state_of_test] = True
-                feed_dict[self.next_relations] = state['next_relations']
-                feed_dict[self.next_entities] = state['next_entities']
-                feed_dict[self.current_entities] = state['current_entities']
-                feed_dict[self.prev_state] = agent_mem
-                feed_dict[self.prev_relation] = previous_relation
+                    first_step_of_test = True
 
-                loss, agent_mem, test_scores, test_action_idx, chosen_relation = sess.run(
-                    [ self.test_loss, self.test_state, self.test_logits, self.test_action_idx, self.chosen_relation],
-                    feed_dict=feed_dict)
+                # loss, agent_mem, test_scores, test_action_idx, chosen_relation = sess.run(
+                #     [ self.test_loss, self.test_state, self.test_logits, self.test_action_idx, self.chosen_relation],
+                #     feed_dict=feed_dict)
 
+                loss, entity_state_emb, test_scores, test_action_idx, chosen_relation = self.agent.step(
+                                                                     next_relations=next_relations, 
+                                                                     next_entities=next_entities, 
+                                                                     prev_state=entity_state_emb, 
+                                                                     prev_relation=prev_relation, 
+                                                                     query_relation=query_relation, 
+                                                                     current_entities=current_entities,
+                                                                     range_arr=range_arr, 
+                                                                     first_step_of_test=first_step_of_test
+                                                                )
 
                 if beam:
                     k = self.test_rollouts
+                    beam_probs = beam_probs.to(self.device)
                     new_scores = test_scores + beam_probs
+                    new_scores = new_scores.cpu()
                     if i == 0:
                         idx = np.argsort(new_scores)
                         idx = idx[:, -k:]
@@ -411,14 +439,14 @@ class Trainer(object):
                     else:
                         idx = self.top_k(new_scores, k)
 
-                    y = idx//self.max_num_actions
-                    x = idx%self.max_num_actions
+                    y = idx // self.max_num_actions
+                    x = idx % self.max_num_actions
 
                     y += np.repeat([b*k for b in range(temp_batch_size)], k)
                     state['current_entities'] = state['current_entities'][y]
                     state['next_relations'] = state['next_relations'][y,:]
                     state['next_entities'] = state['next_entities'][y, :]
-                    agent_mem = agent_mem[:, :, y, :]
+                    entity_state_emb = entity_state_emb[:, :, y, :]
                     test_action_idx = x
                     chosen_relation = state['next_relations'][np.arange(temp_batch_size*k), x]
                     beam_probs = new_scores[y, x]
@@ -435,15 +463,15 @@ class Trainer(object):
                     self.relation_trajectory.append(chosen_relation)
                 ####################
                 state = episode(test_action_idx)
-                self.log_probs += test_scores[np.arange(self.log_probs.shape[0]), test_action_idx]
+                test_scores = test_scores.cpu().numpy()
+                self.log_probs += test_scores[np.arange(self.log_probs.shape[0]), test_action_idx.cpu().numpy()]
             if beam:
                 self.log_probs = beam_probs
 
             ####Logger code####
 
             if print_paths:
-                self.entity_trajectory.append(
-                    state['current_entities'])
+                self.entity_trajectory.append(state['current_entities'])
 
 
             # ask environment for final reward
@@ -540,7 +568,8 @@ class Trainer(object):
         if save_model:
             if all_final_reward_10 >= self.max_hits_at_10:
                 self.max_hits_at_10 = all_final_reward_10
-                self.save_path = self.model_saver.save(sess, self.model_dir + "model" + '.ckpt')
+                torch.save(self.agent.state_dict(), self.model_dir + "model" + '.ckpt')
+                # self.save_path = self.model_saver.save(sess, self.model_dir + "model" + '.ckpt')
 
         if print_paths:
             logger.info("[ printing paths at {} ]".format(self.output_dir+'/test_beam/'))
