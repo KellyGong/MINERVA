@@ -34,6 +34,11 @@ def read_options():
     parser.add_argument("--base_output_dir", default='', type=str)
     parser.add_argument("--total_iterations", default=2000, type=int)
 
+    parser.add_argument("--decay_batch", default=200, type=int)
+    parser.add_argument("--decay_rate", default=0.9, type=float)
+    parser.add_argument("--use_cuda", default=True, type=bool)
+    parser.add_argument("--device", default="cuda", type=str)
+
     parser.add_argument("--Lambda", default=0.0, type=float)
     parser.add_argument("--pool", default="max", type=str)
     parser.add_argument("--eval_every", default=100, type=int)

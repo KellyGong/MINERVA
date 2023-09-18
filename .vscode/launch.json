@@ -1,0 +1,41 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: 当前文件",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "trainer",
+            "type": "python",
+            "request": "launch",
+            "program": "trainer.py",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES":"1"}, 
+            "args": ["--data_input_dir", "datasets/data_preprocessed/nell/",  
+                     "--vocab_dir", "datasets/data_preprocessed/nell/vocab",
+                     "--total_iterations", "3000",
+                     "--path_length", "3",
+                     "--hidden_size", "50",
+                     "--embedding_size", "50",
+                     "--batch_size", "128",
+                     "--beta", "0.05",
+                     "--Lambda", "0.02",
+                     "--use_entity_embeddings", "0",
+                     "--train_entity_embeddings", "0",
+                     "--train_relation_embeddings", "1",
+                     "--base_output_dir", "output/nell/worksfor",
+                     "--load_model", "0",
+                     "--model_load_dir", "logs/RL-Path-RNN/nnnn/45de_3_0.06_10_0.0/model/model.ckpt",
+                     "--nell_evaluation", "0"],
+            "justMyCode": true
+        }
+    ]
+}

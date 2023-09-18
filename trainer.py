@@ -6,18 +6,21 @@ import time
 import os
 import logging
 import numpy as np
-import tensorflow as tf
-from code.model.agent import Agent
-from code.options import read_options
-from code.model.environment import env
+# import tensorflow as tf
+from workspace.model.agent import Agent
+from workspace.options import read_options
+from workspace.model.environment import env
 import codecs
 from collections import defaultdict
 import gc
 import resource
 import sys
-from code.model.baseline import ReactiveBaseline
-from code.model.nell_eval import nell_eval
+from workspace.model.baseline import ReactiveBaseline
+from workspace.model.nell_eval import nell_eval
 from scipy.special import logsumexp as lse
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 logger = logging.getLogger()
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -25,11 +28,10 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 class Trainer(object):
     def __init__(self, params):
-
         # transfer parameters to self
-        for key, val in params.items(): setattr(self, key, val);
+        for key, val in params.items(): setattr(self, key, val)
 
-        self.agent = Agent(params)
+        self.agent = Agent(params).to(self.device)
         self.save_path = None
         self.train_environment = env(params, 'train')
         self.dev_test_environment = env(params, 'dev')
@@ -41,34 +43,44 @@ class Trainer(object):
         self.ePAD = self.entity_vocab['PAD']
         self.rPAD = self.relation_vocab['PAD']
         # optimize
-        self.baseline = ReactiveBaseline(l=self.Lambda)
-        self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
+        self.baseline = ReactiveBaseline(params, self.Lambda)
+        # self.optimizer = tf.train.AdamOptimizer(self.learning_rate)
+        self.optimizer = optim.Adam(self.agent.parameters(), lr=self.learning_rate)
 
 
-    def calc_reinforce_loss(self):
-        loss = tf.stack(self.per_example_loss, axis=1)  # [B, T]
-
-        self.tf_baseline = self.baseline.get_baseline_value()
+    def calc_reinforce_loss(self, all_loss, all_logits, cum_discounted_reward, decaying_beta, baseline):
+        # loss = tf.stack(self.per_example_loss, axis=1)  # [B, T]
+        loss = torch.stack(all_loss, dim=1)
+        base_value = baseline.get_baseline_value()
+        # self.tf_baseline = self.baseline.get_baseline_value()
         # self.pp = tf.Print(self.tf_baseline)
         # multiply with rewards
-        final_reward = self.cum_discounted_reward - self.tf_baseline
+        # final_reward = self.cum_discounted_reward - self.tf_baseline
+        final_reward = cum_discounted_reward - base_value
         # reward_std = tf.sqrt(tf.reduce_mean(tf.square(final_reward))) + 1e-5 # constant addded for numerical stability
-        reward_mean, reward_var = tf.nn.moments(final_reward, axes=[0, 1])
+        # reward_mean, reward_var = tf.nn.moments(final_reward, axes=[0, 1])
+        reward_mean = torch.mean(final_reward)
+        reward_std = torch.std(final_reward) + 1e-6
         # Constant added for numerical stability
-        reward_std = tf.sqrt(reward_var) + 1e-6
-        final_reward = tf.div(final_reward - reward_mean, reward_std)
+        # reward_std = tf.sqrt(reward_var) + 1e-6
+        # final_reward = tf.div(final_reward - reward_mean, reward_std)
+        final_reward = torch.div(final_reward - reward_mean, reward_std)
 
-        loss = tf.multiply(loss, final_reward)  # [B, T]
-        self.loss_before_reg = loss
+        # loss = tf.multiply(loss, final_reward)  # [B, T]
+        loss = torch.mul(loss, final_reward)
+        entropy_loss = decaying_beta * self.entropy_reg_loss(all_logits)
+        # self.loss_before_reg = loss
 
-        total_loss = tf.reduce_mean(loss) - self.decaying_beta * self.entropy_reg_loss(self.per_example_logits)  # scalar
-
+        # total_loss = tf.reduce_mean(loss) - self.decaying_beta * self.entropy_reg_loss(self.per_example_logits)  # scalar
+        total_loss = torch.mean(loss) - entropy_loss
         return total_loss
 
     def entropy_reg_loss(self, all_logits):
-        all_logits = tf.stack(all_logits, axis=2)  # [B, MAX_NUM_ACTIONS, T]
-        entropy_policy = - tf.reduce_mean(tf.reduce_sum(tf.multiply(tf.exp(all_logits), all_logits), axis=1))  # scalar
-        return entropy_policy
+        # all_logits = tf.stack(all_logits, axis=2)  # [B, MAX_NUM_ACTIONS, T]
+        all_logits = torch.stack(all_logits, dim=2)
+        # entropy_policy = - tf.reduce_mean(tf.reduce_sum(tf.multiply(tf.exp(all_logits), all_logits), axis=1))  # scalar
+        entropy_loss = - torch.mean(torch.sum(torch.mul(torch.exp(all_logits), all_logits), dim=1))
+        return entropy_loss
 
     def initialize(self, restore=None, sess=None):
 
@@ -144,17 +156,6 @@ class Trainer(object):
             return  self.model_saver.restore(sess, restore)
 
 
-
-    def initialize_pretrained_embeddings(self, sess):
-        if self.pretrained_embeddings_action != '':
-            embeddings = np.loadtxt(open(self.pretrained_embeddings_action))
-            _ = sess.run((self.agent.relation_embedding_init),
-                         feed_dict={self.agent.action_embedding_placeholder: embeddings})
-        if self.pretrained_embeddings_entity != '':
-            embeddings = np.loadtxt(open(self.pretrained_embeddings_entity))
-            _ = sess.run((self.agent.entity_embedding_init),
-                         feed_dict={self.agent.entity_embedding_placeholder: embeddings})
-
     def bp(self, cost):
         self.baseline.update(tf.reduce_mean(self.cum_discounted_reward))
         tvars = tf.trainable_variables()
@@ -174,10 +175,16 @@ class Trainer(object):
         :param gamma:
         :return:
         """
-        running_add = np.zeros([rewards.shape[0]])  # [B]
-        cum_disc_reward = np.zeros([rewards.shape[0], self.path_length])  # [B, T]
-        cum_disc_reward[:,
-        self.path_length - 1] = rewards  # set the last time step to the reward received at the last state
+        # running_add = np.zeros([rewards.shape[0]])  # [B]
+        # cum_disc_reward = np.zeros([rewards.shape[0], self.path_length])  # [B, T]
+        # cum_disc_reward[:,
+        # self.path_length - 1] = rewards  # set the last time step to the reward received at the last state
+        # for t in reversed(range(self.path_length)):
+        #     running_add = self.gamma * running_add + cum_disc_reward[:, t]
+        #     cum_disc_reward[:, t] = running_add
+        running_add = torch.zeros([rewards.size(0)]).to(self.device)
+        cum_disc_reward = torch.zeros([rewards.size(0), self.path_length]).to(self.device)
+        cum_disc_reward[:, self.path_length - 1] = rewards
         for t in reversed(range(self.path_length)):
             running_add = self.gamma * running_add + cum_disc_reward[:, t]
             cum_disc_reward[:, t] = running_add
@@ -185,9 +192,9 @@ class Trainer(object):
 
     def gpu_io_setup(self):
         # create fetches for partial_run_setup
-        fetches = self.per_example_loss  + self.action_idx + [self.loss_op] + self.per_example_logits + [self.dummy]
-        feeds =  [self.first_state_of_test] + self.candidate_relation_sequence+ self.candidate_entity_sequence + self.input_path + \
-                [self.query_relation] + [self.cum_discounted_reward] + [self.range_arr] + self.entity_sequence
+        # fetches = self.per_example_loss  + self.action_idx + [self.loss_op] + self.per_example_logits + [self.dummy]
+        # feeds =  [self.first_state_of_test] + self.candidate_relation_sequence+ self.candidate_entity_sequence + self.input_path + \
+        #         [self.query_relation] + [self.cum_discounted_reward] + [self.range_arr] + self.entity_sequence
 
 
         feed_dict = [{} for _ in range(self.path_length)]
@@ -201,38 +208,91 @@ class Trainer(object):
             feed_dict[i][self.candidate_entity_sequence[i]] = None
             feed_dict[i][self.entity_sequence[i]] = None
 
-        return fetches, feeds, feed_dict
+        return feed_dict
 
-    def train(self, sess):
+    def train(self):
         # import pdb
         # pdb.set_trace()
-        fetches, feeds, feed_dict = self.gpu_io_setup()
+        # fetches, feeds, feed_dict = self.gpu_io_setup()
 
-        train_loss = 0.0
+        # feed_dict = self.gpu_io_setup()
+
+        # train_loss = 0.0
         start_time = time.time()
         self.batch_counter = 0
+        current_decay = self.beta
         for episode in self.train_environment.get_episodes():
 
             self.batch_counter += 1
-            h = sess.partial_run_setup(fetches=fetches, feeds=feeds)
-            feed_dict[0][self.query_relation] = episode.get_query_relation()
-
+            if self.batch_counter % self.decay_batch == 0:
+                current_decay *= self.decay_rate
+            # h = sess.partial_run_setup(fetches=fetches, feeds=feeds)
+            
             # get initial state
             state = episode.get_state()
+            entity_state_emb = torch.zeros(1, 2, self.batch_size * self.num_rollouts,
+										   self.agent.m * self.embedding_size).to(self.device)
+            next_possible_relations = torch.tensor(state['next_relations']).long().to(self.device)
+            next_possible_entities = torch.tensor(state['next_entities']).long().to(self.device)
+            prev_relation = self.agent.dummy_start_label.to(self.device)
+
+            query_relation = episode.get_query_relation()
+            query_relation = torch.tensor(query_relation).long().to(self.device)
+            current_entities_t = torch.tensor(state['current_entities']).long().to(self.device)
+            prev_entities = current_entities_t.clone()
+
+            first_step_of_test = False
+            range_arr = torch.arange(self.batch_size * self.num_rollouts).to(self.device)
+
             # for each time step
-            loss_before_regularization = []
-            logits = []
+            # loss_before_regularization = []
+            # logits = []
+            # candidate_relation_sequence = [[] for _ in range(self.path_length)]
+            # candidate_entity_sequence = [[] for _ in range(self.path_length)]
+            # entity_sequence = [[] for _ in range(self.path_length)]
+            # input_path = [np.zeros(self.batch_size * self.num_rollouts) for _ in range(self.path_length)]
+
+            all_loss = []  # list of loss tensors each [B,]
+            all_logits = []  # list of actions each [B,]
+            all_action_idx = []
+
             for i in range(self.path_length):
-                feed_dict[i][self.candidate_relation_sequence[i]] = state['next_relations']
-                feed_dict[i][self.candidate_entity_sequence[i]] = state['next_entities']
-                feed_dict[i][self.entity_sequence[i]] = state['current_entities']
-                per_example_loss, per_example_logits, idx = sess.partial_run(h, [self.per_example_loss[i], self.per_example_logits[i], self.action_idx[i]],
-                                                  feed_dict=feed_dict[i])
-                loss_before_regularization.append(per_example_loss)
-                logits.append(per_example_logits)
+                # feed_dict[i][self.candidate_relation_sequence[i]] = state['next_relations']
+                # feed_dict[i][self.candidate_entity_sequence[i]] = state['next_entities']
+                # feed_dict[i][self.entity_sequence[i]] = state['current_entities']
+                # candidate_relation_sequence[i] = state['next_relations']
+                # candidate_entity_sequence[i] = state['next_entities']
+                # entity_sequence[i] = state['current_entities']
+
+                loss, new_state, logits, idx, chosen_relation = self.agent.step(
+                                                                     next_relations=next_possible_relations, 
+                                                                     next_entities=next_possible_entities, 
+                                                                     prev_state=entity_state_emb, 
+                                                                     prev_relation=prev_relation, 
+                                                                     query_embedding=query_relation, 
+                                                                     current_entities=current_entities_t,
+                                                                     range_arr=range_arr, 
+                                                                     first_step_of_test=first_step_of_test
+                                                                )
+
+                
+                # per_example_loss, per_example_logits, idx = sess.partial_run(h, [self.per_example_loss[i], self.per_example_logits[i], self.action_idx[i]],
+                #                                   feed_dict=feed_dict[i])
+                # loss_before_regularization.append(per_example_loss)
+                # logits.append(per_example_logits)
                 # action = np.squeeze(action, axis=1)  # [B,]
                 state = episode(idx)
-            loss_before_regularization = np.stack(loss_before_regularization, axis=1)
+                next_possible_relations = torch.tesnor(state['next_relations']).long().to(self.device)
+                next_possible_entities = torch.tensor(state['next_entities']).long().to(self.device)
+                current_entities_t = torch.tensor(state['current_entities']).long().to(self.device)
+                prev_relation = chosen_relation.to(self.device)
+                prev_entities = current_entities_t.clone()
+
+                all_loss.append(loss)
+                all_logits.append(logits)
+                all_action_idx.append(idx)
+                
+            # loss_before_regularization = np.stack(loss_before_regularization, axis=1)
 
             # get the final reward from the environment
             rewards = episode.get_reward()
@@ -240,13 +300,20 @@ class Trainer(object):
             # computed cumulative discounted reward
             cum_discounted_reward = self.calc_cum_discounted_reward(rewards)  # [B, T]
 
-
+            batch_total_loss = self.calc_reinforce_loss(all_loss, all_logits, cum_discounted_reward, current_decay, self.baseline)
             # backprop
-            batch_total_loss, _ = sess.partial_run(h, [self.loss_op, self.dummy],
-                                                   feed_dict={self.cum_discounted_reward: cum_discounted_reward})
+            # batch_total_loss, _ = sess.partial_run(h, [self.loss_op, self.dummy],
+            #                                        feed_dict={self.cum_discounted_reward: cum_discounted_reward})
 
             # print statistics
-            train_loss = 0.98 * train_loss + 0.02 * batch_total_loss
+            # train_loss = 0.98 * train_loss + 0.02 * batch_total_loss
+
+            self.baseline.update(torch.mean(cum_discounted_reward))
+            self.optimizer.zero_grad()
+            batch_total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.agent.parameters(), max_norm=self.grad_clip_norm, norm_type=2)
+
+
             avg_reward = np.mean(rewards)
             # now reshape the reward to [orig_batch_size, num_rollouts], I want to calculate for how many of the
             # entity pair, atleast one of the path get to the right answer
@@ -254,7 +321,7 @@ class Trainer(object):
             reward_reshape = np.sum(reward_reshape, axis=1)  # [orig_batch]
             reward_reshape = (reward_reshape > 0)
             num_ep_correct = np.sum(reward_reshape)
-            if np.isnan(train_loss):
+            if np.isnan(batch_total_loss.cpu().numpy()):
                 raise ArithmeticError("Error in computing loss")
 
             logger.info("batch_counter: {0:4d}, num_hits: {1:7.4f}, avg. reward per batch {2:7.4f}, "
@@ -540,24 +607,17 @@ if __name__ == '__main__':
     logger.info('Total number of entities {}'.format(len(options['entity_vocab'])))
     logger.info('Total number of relations {}'.format(len(options['relation_vocab'])))
     save_path = ''
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = False
-    config.log_device_placement = False
 
 
     #Training
     if not options['load_model']:
         trainer = Trainer(options)
-        with tf.Session(config=config) as sess:
-            sess.run(trainer.initialize())
-            trainer.initialize_pretrained_embeddings(sess=sess)
 
-            trainer.train(sess)
-            save_path = trainer.save_path
-            path_logger_file = trainer.path_logger_file
-            output_dir = trainer.output_dir
+        trainer.train()
+        save_path = trainer.save_path
+        path_logger_file = trainer.path_logger_file
+        output_dir = trainer.output_dir
 
-        tf.reset_default_graph()
     #Testing on test with best model
     else:
         logger.info("Skipping training")
